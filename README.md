@@ -27,6 +27,23 @@ The first start fills the database with the school's starting content and create
 | `npm start` | Runs the API and serves the built website on http://localhost:5000 |
 | `npm run seed:reset` | **Deletes all website content** and reloads the original demo content |
 
+## Deploying to Vercel
+
+The website and the API both run on Vercel: `api/index.js` wraps the Express app as a serverless
+function, and `vercel.json` routes `/api/*` and `/uploads/*` to it.
+
+1. **Database:** create a free cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas), add a database user,
+   and under *Network Access* allow `0.0.0.0/0` (Vercel has no fixed IP). Copy the connection string
+   (`mongodb+srv://...`) and add the database name, e.g. `.../kes_kanyashala?retryWrites=true&w=majority`.
+2. **Import the repo** at [vercel.com/new](https://vercel.com/new). The Vite settings are picked up from `vercel.json`.
+3. **Environment variables** (Project → Settings → Environment Variables):
+   `MONGODB_URI`, `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`.
+4. **File uploads:** Project → Storage → create a **Blob** store and connect it. This adds `BLOB_READ_WRITE_TOKEN`.
+   On Vercel each upload must be under 4 MB.
+5. **Redeploy** (Deployments → ⋯ → Redeploy) so the new variables take effect.
+
+The first request fills the empty database with the starting content and creates the admin account.
+
 ## Admin dashboard
 
 Open **http://localhost:5173/admin** (it is not linked anywhere on the public site).
@@ -50,7 +67,7 @@ What the admin can manage (add / edit / delete):
 | School Information (contact details, announcement bar, principal’s message, home page numbers, prospectus / calendar PDFs) | Whole site |
 | Messages & Enquiries (admission enquiries, contact messages, alumni sign-ups) | Read-only inbox |
 
-Uploaded photos and documents are saved in `server/uploads/`.
+Uploaded photos and documents are saved in `server/uploads/` (on Vercel: in Vercel Blob storage).
 
 ## Project structure
 

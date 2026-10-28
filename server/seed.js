@@ -16,7 +16,7 @@ import {
   mockFacilities,
   mockTestimonials,
   defaultSettings,
-} from '../src/data/mockData.ts';
+} from './startingContent.js';
 import { resources, Settings, Admin } from './models.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,10 +27,10 @@ const withoutIds = (items) => items.map(({ id, ...rest }) => rest);
 
 /** Writes a simple one-page placeholder PDF so demo download buttons work. Returns its URL. */
 function samplePdf(title) {
-  fs.mkdirSync(SAMPLE_DIR, { recursive: true });
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
   const file = path.join(SAMPLE_DIR, `${slug}.pdf`);
   if (!fs.existsSync(file)) {
+    fs.mkdirSync(SAMPLE_DIR, { recursive: true });
     const esc = (s) => s.replace(/[^\x20-\x7E]/g, '').replace(/[\\()]/g, (m) => '\\' + m);
     const content = [
       `BT /F1 18 Tf 60 750 Td (${esc('K.E.S. Smt. J.R.H. Kanyashala, Alibag')}) Tj ET`,
@@ -112,7 +112,7 @@ if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('server/seed
   await import('dotenv/config');
   const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/kes_kanyashala';
   await mongoose.connect(uri);
-  console.log(`Seeding ${uri} ...`);
+  console.log('Seeding the database ...');
   await seedDatabase({ reset: process.argv.includes('--reset') });
   await mongoose.disconnect();
   console.log('Done.');

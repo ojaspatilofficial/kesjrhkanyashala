@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { put } from '@vercel/blob';
 import { resources, forms, Settings, Admin } from './models.js';
 import { seedDatabase } from './seed.js';
 
@@ -20,16 +21,48 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/kes_ka
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const DIST_DIR = path.join(__dirname, '..', 'dist');
+// On Vercel the disk is read-only, so uploads go to Vercel Blob storage instead.
+const ON_VERCEL = Boolean(process.env.VERCEL);
+const USE_BLOB = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
 if (!process.env.JWT_SECRET) {
   console.warn('JWT_SECRET is not set in .env — admin logins will reset whenever the server restarts.');
 }
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!ON_VERCEL) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const app = express();
+export const app = express();
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d' }));
+
+/* ------------------------------- Database ------------------------------- */
+
+// Connect once and reuse the connection (serverless functions keep it between requests).
+let connecting;
+export function connectDb() {
+  connecting ??= mongoose
+    .connect(MONGODB_URI, { serverSelectionTimeoutMS: 10000 })
+    .then(async () => {
+      console.log('Connected to MongoDB.');
+      await seedDatabase();
+    })
+    .catch((err) => {
+      connecting = undefined;
+      throw err;
+    });
+  return connecting;
+}
+
+app.use('/api', async (_req, res, next) => {
+  try {
+    await connectDb();
+    next();
+  } catch (err) {
+    console.error('Could not connect to MongoDB:', err.message);
+    res.status(503).json({ error: 'The school database is not reachable right now.' });
+  }
+});
 
 // Small helper so async route errors become JSON responses.
 const handle = (fn) => (req, res) =>
@@ -121,20 +154,24 @@ const allowedTypes = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
 };
 
+function safeFilename(file) {
+  const base = path
+    .parse(file.originalname)
+    .name.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40);
+  return `${Date.now()}-${base || 'file'}${allowedTypes[file.mimetype]}`;
+}
+
+// Vercel functions accept request bodies up to 4.5 MB, so Blob uploads are capped at 4 MB.
+const MAX_UPLOAD_MB = USE_BLOB ? 4 : 15;
+
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (_req, file, cb) => {
-      const base = path
-        .parse(file.originalname)
-        .name.toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 40);
-      cb(null, `${Date.now()}-${base || 'file'}${allowedTypes[file.mimetype]}`);
-    },
-  }),
-  limits: { fileSize: 15 * 1024 * 1024 },
+  storage: USE_BLOB
+    ? multer.memoryStorage()
+    : multer.diskStorage({ destination: UPLOAD_DIR, filename: (_req, file, cb) => cb(null, safeFilename(file)) }),
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
   // Skip files of other types (the route below explains why). Rejecting with an error here
   // would cut the connection before the browser receives the message.
   fileFilter: (req, file, cb) => {
@@ -150,20 +187,43 @@ function formatSize(bytes) {
 }
 
 app.post('/api/upload', requireAdmin, (req, res) => {
-  upload.single('file')(req, res, (err) => {
+  if (ON_VERCEL && !USE_BLOB) {
+    return res.status(500).json({ error: 'File uploads are not set up yet. Connect Vercel Blob storage to this project.' });
+  }
+  upload.single('file')(req, res, async (err) => {
     if (err) {
-      const message = err.code === 'LIMIT_FILE_SIZE' ? 'The file is too big. Please keep it under 15 MB.' : err.message;
+      const message =
+        err.code === 'LIMIT_FILE_SIZE' ? `The file is too big. Please keep it under ${MAX_UPLOAD_MB} MB.` : err.message;
       return res.status(400).json({ error: message });
     }
     if (req.rejectedFile) {
       return res.status(400).json({ error: 'Only photos (JPG, PNG, WEBP) and documents (PDF, Word, Excel) can be uploaded.' });
     }
     if (!req.file) return res.status(400).json({ error: 'No file was received.' });
+
+    let url;
+    let filename = req.file.filename;
+    if (USE_BLOB) {
+      filename = safeFilename(req.file);
+      try {
+        const blob = await put(`uploads/${filename}`, req.file.buffer, {
+          access: 'public',
+          contentType: req.file.mimetype,
+        });
+        url = blob.url;
+      } catch (blobErr) {
+        console.error('Blob upload failed:', blobErr);
+        return res.status(500).json({ error: 'The file could not be saved. Please try again.' });
+      }
+    } else {
+      url = `/uploads/${filename}`;
+    }
+
     res.json({
-      url: `/uploads/${req.file.filename}`,
+      url,
       name: req.file.originalname,
       size: formatSize(req.file.size),
-      type: path.extname(req.file.filename).slice(1).toUpperCase(),
+      type: path.extname(filename).slice(1).toUpperCase(),
     });
   });
 });
@@ -320,19 +380,21 @@ app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
 /* --------------- Serve the built website (after `npm run build`) -------- */
 
-if (fs.existsSync(DIST_DIR)) {
+if (!ON_VERCEL && fs.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
   app.get('*', (_req, res) => res.sendFile(path.join(DIST_DIR, 'index.html')));
 }
 
 /* -------------------------------- Start --------------------------------- */
 
-try {
-  await mongoose.connect(MONGODB_URI);
-  console.log(`Connected to MongoDB: ${MONGODB_URI}`);
-  await seedDatabase();
-  app.listen(PORT, () => console.log(`School API running on http://localhost:${PORT}`));
-} catch (err) {
-  console.error('Could not connect to MongoDB. Is the MongoDB service running?\n', err.message);
-  process.exit(1);
+// Run the server only when started with `node server/index.js` (not when Vercel imports the app).
+const startedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (startedDirectly) {
+  try {
+    await connectDb();
+    app.listen(PORT, () => console.log(`School API running on http://localhost:${PORT}`));
+  } catch (err) {
+    console.error('Could not connect to MongoDB. Is the MongoDB service running?\n', err.message);
+    process.exit(1);
+  }
 }

@@ -29,3 +29,6 @@ dist-ssr
 # Files uploaded through the admin dashboard (keep the sample PDFs used by the seed)
 server/uploads/*
 !server/uploads/samples/
+
+# Vercel
+.vercel

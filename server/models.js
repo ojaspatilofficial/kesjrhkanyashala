@@ -1,6 +1,6 @@
 // MongoDB collections (Mongoose models) for the school website.
 import mongoose from 'mongoose';
-import { defaultSettings } from '../src/data/mockData.ts';
+import { defaultSettings } from './startingContent.js';
 
 const { Schema } = mongoose;
 
